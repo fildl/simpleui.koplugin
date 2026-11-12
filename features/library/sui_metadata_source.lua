@@ -45,8 +45,11 @@ local ffiUtil     = require("ffi/util")
 local LRU         = require("infra/sui_lru")
 local FilterState = require("features/library/sui_filter_state")
 local BimStamp    = require("features/library/sui_bim_stamp")
+local SUISettings = require("infra/sui_store")
 
 local MetadataSource = {}
+
+local SETTING_PUB_YEAR_OVERRIDES = "simpleui_pub_year_overrides"
 
 -- ---------------------------------------------------------------------------
 -- Caches
@@ -214,6 +217,11 @@ local function resolveRow(row, cal)
         row.keywords = nonEmpty(row.keywords) or cal.keywords
         row.pubdate  = cal.pubdate
         row.pub_year = cal.pub_year
+    end
+
+    local overrides = SUISettings:readSetting(SETTING_PUB_YEAR_OVERRIDES)
+    if overrides and overrides[row[1]] ~= nil then
+        row.pub_year = overrides[row[1]]
     end
 
     row.authors, row.keywords = nonEmpty(row.authors), nonEmpty(row.keywords)
@@ -519,6 +527,88 @@ function MetadataSource.sortFiles(files, active_dimension)
         if at ~= bt then return strcollSafe(at, bt) end
         return strcollSafe(a[2], b[2])
     end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Publication year overrides
+-- ---------------------------------------------------------------------------
+
+local function findCalibreBase(filepath)
+    local dir = filepath:match("^(.-)/[^/]+$")
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if not (ok_lfs and lfs) then return nil end
+    while dir and dir ~= "" and dir ~= "/" do
+        if lfs.attributes(dir .. "/metadata.calibre", "mode") == "file" then
+            return dir
+        end
+        dir = dir:match("^(.-)/[^/]+$")
+    end
+    if G_reader_settings then
+        local home = G_reader_settings:readSetting("home_dir")
+        if home and lfs.attributes(home .. "/metadata.calibre", "mode") == "file" then
+            return home
+        end
+    end
+    return nil
+end
+
+function MetadataSource.getBookPubYear(filepath, base_dir)
+    if not filepath then return nil end
+    local overrides = SUISettings:readSetting(SETTING_PUB_YEAR_OVERRIDES)
+    if overrides and overrides[filepath] ~= nil then
+        return overrides[filepath]
+    end
+
+    local ok_ds, ds = pcall(function()
+        local DocSettings = require("docsettings")
+        return DocSettings:open(filepath)
+    end)
+    if ok_ds and ds then
+        local y = ds:readSetting("custom_pub_year")
+        if y ~= nil then return tonumber(y) end
+    end
+
+    local bdir = base_dir or findCalibreBase(filepath)
+    if bdir then
+        local cal_index = loadCalibreIndex(bdir)
+        local cal = cal_index and cal_index[filepath]
+        if cal and cal.pub_year then
+            return cal.pub_year
+        end
+    end
+    return nil
+end
+
+function MetadataSource.setBookPubYear(filepath, year)
+    if not filepath then return end
+    local overrides = SUISettings:readSetting(SETTING_PUB_YEAR_OVERRIDES)
+    local copy = {}
+    if overrides then
+        for k, v in pairs(overrides) do copy[k] = v end
+    end
+    copy[filepath] = year
+    SUISettings:saveSetting(SETTING_PUB_YEAR_OVERRIDES, copy)
+    SUISettings:flush()
+
+    pcall(function()
+        local DocSettings = require("docsettings")
+        local ds = DocSettings:open(filepath)
+        if ds then
+            if year then
+                ds:saveSetting("custom_pub_year", year)
+            else
+                ds:delSetting("custom_pub_year")
+            end
+            ds:flush()
+        end
+    end)
+
+    MetadataSource.clearCache()
+    local ok_uim, UIManager = pcall(require, "ui/uimanager")
+    local ok_evt, Event = pcall(require, "ui/event")
+    if ok_uim and ok_evt and UIManager and Event then
+        UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
+    end
 end
 
 return MetadataSource

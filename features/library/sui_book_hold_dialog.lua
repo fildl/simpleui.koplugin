@@ -277,6 +277,41 @@ local function settingsItem(ctx)
     }
 end
 
+local function pubYearItem(ctx)
+    local MetadataSource = require("features/library/sui_metadata_source")
+    local cur_year = MetadataSource.getBookPubYear(ctx.path)
+    local display_val = cur_year and tostring(cur_year) or "—"
+    return {
+        text     = _("Publication year"),
+        value    = display_val,
+        sui_icon = "calendar_select",
+        callback = function()
+            ctx.close()
+            local Dialogs = require("features/dialogs/sui_dialogs")
+            Dialogs.prompt{
+                title       = _("Publication year"),
+                description = _("Enter publication year (e.g. 1952), or leave empty to use default:"),
+                value       = cur_year and tostring(cur_year) or "",
+                hint        = "YYYY",
+                input_type  = "number",
+                allow_empty = true,
+                ok_text     = _("Save"),
+                cancel_text = _("Cancel"),
+                validate    = function(text)
+                    if text ~= "" and (not text:match("^%d+$") or #text > 4) then
+                        return _("Please enter a valid 4-digit year")
+                    end
+                end,
+                on_submit   = function(text)
+                    local y = tonumber(text)
+                    MetadataSource.setBookPubYear(ctx.path, y)
+                    if ctx.refresh then ctx.refresh() end
+                end,
+            }
+        end,
+    }
+end
+
 -- Rows registered through FileManager:addFileDialogButtons.
 local function registeredRows(ctx)
     local rows = {}
@@ -302,6 +337,10 @@ end
 local function listRows(ctx, registered, delete)
     local rows = {}
     local opts = ctx.opts
+
+    if ctx.is_book then
+        Rows.pushRow(rows, pubYearItem(ctx))
+    end
 
     for _i, row in ipairs(registered) do
         if #row == 1 then rows[#rows + 1] = row end
