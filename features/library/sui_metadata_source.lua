@@ -163,9 +163,20 @@ local function loadCalibreIndex(dir)
             local series_index = (type(book.series_index) == "number") and book.series_index or nil
             local title = (type(book.title) == "string") and book.title or nil
 
+            local pub_year = nil
+            if type(book.pubdate) == "string" then
+                local y = book.pubdate:match("(%d%d%d%d)")
+                if y then pub_year = tonumber(y) end
+            end
+            if not pub_year and type(book.date) == "string" then
+                local y = book.date:match("(%d%d%d%d)")
+                if y then pub_year = tonumber(y) end
+            end
+
             index[fullpath] = {
                 title = title, authors = authors_str, series = series,
                 series_index = series_index, keywords = keywords_str,
+                pubdate = book.pubdate, pub_year = pub_year,
             }
         end
     end
@@ -201,6 +212,8 @@ local function resolveRow(row, cal)
         row.title    = nonEmpty(row.title)    or cal.title
         row.authors  = nonEmpty(row.authors)  or cal.authors
         row.keywords = nonEmpty(row.keywords) or cal.keywords
+        row.pubdate  = cal.pubdate
+        row.pub_year = cal.pub_year
     end
 
     row.authors, row.keywords = nonEmpty(row.authors), nonEmpty(row.keywords)
@@ -289,6 +302,7 @@ local function fetchScopeRows(bim, base_dir)
                     fullpath, fname,
                     title = cal.title, authors = cal.authors, series = cal.series,
                     series_index = cal.series_index, keywords = cal.keywords,
+                    pubdate = cal.pubdate, pub_year = cal.pub_year,
                 }
                 resolveRow(row)
                 rows[#rows + 1] = row
@@ -455,25 +469,31 @@ function MetadataSource.getValidFacetCounts(bim, base_dir, dimension, filter_sta
     local key = serializeTrail(filter_state) .. "\31" .. dimension .. "\29" .. variant
     local cached = _valid_facets_cache:get(key, scope)
     if not cached then
-        local counts, firsts = {}, {}
-        local current_path
+        local counts, firsts, first_years = {}, {}, {}
+        local current_row
         local function count(facet_key)
             counts[facet_key] = (counts[facet_key] or 0) + 1
             local first = firsts[facet_key]
             if not first then
-                firsts[facet_key] = { current_path }
+                firsts[facet_key] = { current_row[1] }
             elseif #first < MetadataSource.FIRST_PATHS then
-                first[#first + 1] = current_path
+                first[#first + 1] = current_row[1]
+            end
+            if current_row.pub_year then
+                local fy = first_years[facet_key]
+                if not fy or current_row.pub_year < fy then
+                    first_years[facet_key] = current_row.pub_year
+                end
             end
         end
         local definition = FilterState.DIMENSIONS[dimension]
         for _, row in ipairs(rows) do
-            current_path = row[1]
+            current_row = row
             FilterState.eachFacetValue(row, definition, count)
         end
-        cached = _valid_facets_cache:put(key, { counts, firsts }, 0, scope)
+        cached = _valid_facets_cache:put(key, { counts, firsts, first_years }, 0, scope)
     end
-    return cached[1], cached[2]
+    return cached[1], cached[2], cached[3]
 end
 
 -- ---------------------------------------------------------------------------

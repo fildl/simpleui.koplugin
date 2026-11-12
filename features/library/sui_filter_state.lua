@@ -115,9 +115,15 @@ FilterState.DIMENSIONS = {
         repeat_mode = "and",
         subgroup_by = "series",
     },
+    nationality = {
+        column      = "keywords",
+        multi_value = true,
+        repeat_mode = "and",
+        subgroup_by = "author",
+    },
 }
 
-FilterState.ORDERED_DIMENSIONS = { "author", "series", "tags" }
+FilterState.ORDERED_DIMENSIONS = { "author", "series", "tags", "nationality" }
 
 function FilterState.isDimension(dimension)
     return FilterState.DIMENSIONS[dimension] ~= nil
@@ -230,16 +236,17 @@ end
 -- book count and `total` is the number of books listed. A group needs at
 -- least MIN_GROUP_SIZE books, and a single group holding every book is not
 -- worth an extra level. Returns the set of chosen keys.
-function FilterState.selectGroups(sizes, total)
+function FilterState.selectGroups(sizes, total, min_size)
+    local threshold = min_size or FilterState.MIN_GROUP_SIZE
     local chosen, chosen_count, covered = {}, 0, 0
     for key, size in pairs(sizes) do
-        if size >= FilterState.MIN_GROUP_SIZE then
+        if size >= threshold then
             chosen[key] = true
             chosen_count = chosen_count + 1
             covered = covered + size
         end
     end
-    if chosen_count == 1 and covered == total then return {} end
+    if chosen_count == 1 and covered == total and threshold > 1 then return {} end
     return chosen
 end
 

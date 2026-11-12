@@ -66,13 +66,14 @@ local M = {}
 -- Display labels — a presentation concern, deliberately not part of
 -- FilterState.DIMENSIONS (which only knows about row fields).
 local DIM_LABELS = {
-    author = _("Authors"),
-    series = _("Series"),
-    tags   = _("Tags"),
+    author      = _("Authors"),
+    series      = _("Series"),
+    tags        = _("Tags"),
+    nationality = _("Nationality"),
 }
 
 -- Ordered browse modes: the filesystem view followed by every metadata dimension.
-M.MODES = { "normal", "author", "series", "tags" }
+M.MODES = { "normal", "author", "series", "tags", "nationality" }
 
 function M.getModeLabel(mode)
     if mode == "normal" then return _("Library") end
@@ -180,8 +181,8 @@ end
 
 function M.getPathMode(path)
     if not VirtualPath.isVirtual(path) then return "normal" end
-    local _base, _state, active_dimension = VirtualPath.parse(path)
-    return active_dimension or "normal"
+    local _base, state, active_dimension = VirtualPath.parse(path)
+    return active_dimension or FilterState.entryDimension(state) or "normal"
 end
 
 function M.getCurrentMode(fc)
@@ -491,7 +492,7 @@ end
 -- when no cover is available (e.g. the "no author"/"no series" bucket whose
 -- books have no cached covers yet). `first_paths` are the books its cover is
 -- taken from, in order; the list is shared, read-only.
-local function _facetFolder(fc, base_dir, filter_state, dimension, entry, index, count, first_paths, collate)
+local function _facetFolder(fc, base_dir, filter_state, dimension, entry, index, count, first_paths, collate, first_year)
     local value = entry[1]
     local item  = fc:getListItem(nil, VirtualPath.displayValue(value),
         VirtualPath.buildLeaf(base_dir, filter_state, dimension, value),
@@ -501,6 +502,7 @@ local function _facetFolder(fc, base_dir, filter_state, dimension, entry, index,
     item.is_virtual_meta_leaf = true
     item.virtual_leaf_count   = count
     item.cover_paths          = first_paths
+    item.first_year           = first_year
     return item
 end
 
@@ -510,30 +512,34 @@ end
 -- split.
 local function _appendSubgroupFolders(fc, bim, base_dir, filter_state, collate, dirs)
     local dimension = FilterState.subgroupDimension(filter_state)
-    if not (dimension and FolderCovers.getSeriesGrouping(FilterState.entryDimension(filter_state))) then
+    local entry_dim = FilterState.entryDimension(filter_state)
+    local grouping_enabled = (dimension == "author") or FolderCovers.getSeriesGrouping(entry_dim)
+    if not (dimension and grouping_enabled) then
         return nil
     end
 
     local variant, accept = _listingFilter(fc)
-    local counts, firsts = MetadataSource.getValidFacetCounts(
+    local counts, firsts, first_years = MetadataSource.getValidFacetCounts(
         bim, base_dir, dimension, filter_state, variant, accept)
     local sizes = {}
     for key, count in pairs(counts) do
         if key ~= false then sizes[key] = count end
     end
     local total  = #MetadataSource.getValidRows(bim, base_dir, filter_state, variant, accept)
-    local groups = FilterState.selectGroups(sizes, total)
+    local min_size = (entry_dim == "nationality") and 1 or nil
+    local groups = FilterState.selectGroups(sizes, total, min_size)
 
     local values = MetadataSource.getFacetValues(bim, base_dir, dimension, filter_state, false)
     for i, entry in ipairs(values) do
         if groups[entry.key] then
             dirs[#dirs + 1] = collate
                 and _facetFolder(fc, base_dir, filter_state, dimension, entry, i,
-                                 counts[entry.key], firsts[entry.key], collate)
+                                 counts[entry.key], firsts[entry.key], collate,
+                                 first_years and first_years[entry.key])
                 or true
         end
     end
-    return groups
+    return groups, dimension
 end
 
 -- Widest secondary text of a listed book, in characters. The list renderer
@@ -553,12 +559,26 @@ end
 -- and once the series is fixed too only the index in it remains.
 local function _bookContext(row, selected)
     if not selected.author then
-        return Text.truncate(Text.formatAuthors(row.authors), CONTEXT_MAX_CHARS)
+        local author_str = Text.truncate(Text.formatAuthors(row.authors), CONTEXT_MAX_CHARS)
+        if author_str and row.pub_year then
+            return Text.truncate(author_str .. " (" .. tostring(row.pub_year) .. ")", CONTEXT_MAX_CHARS)
+        end
+        return author_str
     end
     if selected.series then
-        return row.series_index and "#" .. tostring(row.series_index) or nil
+        local idx = row.series_index and "#" .. tostring(row.series_index) or nil
+        if idx and row.pub_year then
+            return idx .. " (" .. tostring(row.pub_year) .. ")"
+        end
+        return idx or (row.pub_year and tostring(row.pub_year))
     end
-    return _seriesLabel(row)
+    local s = _seriesLabel(row)
+    if s and row.pub_year then
+        return Text.truncate(s .. " (" .. tostring(row.pub_year) .. ")", CONTEXT_MAX_CHARS)
+    end
+    if s then return s end
+    if row.pub_year then return tostring(row.pub_year) end
+    return nil
 end
 
 local function _getVirtualList(fc, path, collate)
@@ -636,11 +656,26 @@ local function _getVirtualList(fc, path, collate)
         local leaf_dimension = trail[#trail] and trail[#trail].dimension
         MetadataSource.sortFiles(rows, leaf_dimension)
 
-        local subgroups = _appendSubgroupFolders(fc, bim, base_dir, filter_state, collate, dirs)
+        local subgroups, subgroup_dim = _appendSubgroupFolders(fc, bim, base_dir, filter_state, collate, dirs)
 
         for _, row in ipairs(rows) do
             -- Books of a sub-group are listed inside its folder.
-            if not (subgroups and subgroups[row.series_key]) then
+            local in_subgroup = false
+            if subgroups then
+                if subgroup_dim == "author" then
+                    if row.authors then
+                        for a in row.authors:gmatch("[^\n]+") do
+                            if subgroups[a] then in_subgroup = true; break end
+                        end
+                    elseif subgroups[false] then
+                        in_subgroup = true
+                    end
+                else
+                    in_subgroup = subgroups[row.series_key]
+                end
+            end
+
+            if not in_subgroup then
                 local fullpath, fname = row[1], row[2]
                 -- lfs.attributes() is needed here: FC requires the attr table to
                 -- build each list item, and it doubles as a stale-entry filter.
@@ -658,6 +693,7 @@ local function _getVirtualList(fc, path, collate)
                             series_index  = row.series_index,
                         }
                     end
+                    item.pub_year = row.pub_year
                     if collate then
                         item.mandatory = _bookContext(row, filter_state.selected) or item.mandatory
                     end
@@ -740,10 +776,39 @@ local function _installPatches()
                 local reverse = G_reader_settings:isTrue("reverse_collate")
                 local trail   = filter_state and filter_state.trail or {}
                 local leaf    = trail[#trail] and trail[#trail].dimension
-                if level == "file_list" and leaf ~= "series" and #fls > 1 then
+                local entry_dim = FilterState.entryDimension(filter_state)
+
+                if entry_dim == "nationality" and #fls > 1 then
+                    table.sort(fls, function(a, b)
+                        local ya, yb = a.pub_year, b.pub_year
+                        if ya and yb and ya ~= yb then
+                            return ya < yb
+                        elseif ya and not yb then
+                            return true
+                        elseif not ya and yb then
+                            return false
+                        end
+                        local ta = (a.doc_props and a.doc_props.display_title) or a.text or ""
+                        local tb = (b.doc_props and b.doc_props.display_title) or b.text or ""
+                        return ta < tb
+                    end)
+                elseif level == "file_list" and leaf ~= "series" and #fls > 1 then
                     table.sort(fls, fc:getSortingFunction(collate, reverse))
                 end
-                if #dirs > 1 then
+
+                if entry_dim == "nationality" and leaf == "nationality" and #dirs > 1 then
+                    table.sort(dirs, function(a, b)
+                        local ya, yb = a.first_year, b.first_year
+                        if ya and yb and ya ~= yb then
+                            return ya < yb
+                        elseif ya and not yb then
+                            return true
+                        elseif not ya and yb then
+                            return false
+                        end
+                        return (a.text or "") < (b.text or "")
+                    end)
+                elseif #dirs > 1 then
                     -- A collate that cannot sort metadata folders keeps them by name.
                     table.sort(dirs, SortSheet.sortsFacetFolders(collate_id)
                         and fc:getSortingFunction(collate, reverse)
