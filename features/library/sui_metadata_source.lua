@@ -97,8 +97,11 @@ end
 -- Clears every cache entry whose base_dir is `base_dir` or a subdirectory
 -- of it (so invalidating a parent also invalidates narrower queries below
 -- it). base_dir == nil clears everything.
+local _doc_year_cache = {}
+
 function MetadataSource.clearCache(base_dir)
     if not base_dir then
+        _doc_year_cache = {}
         for _, cache in ipairs(_all_caches) do cache:clear() end
         return
     end
@@ -120,73 +123,216 @@ local function syncWithDatabase()
 end
 
 -- ---------------------------------------------------------------------------
--- Calibre metadata.calibre backfill
+-- Calibre metadata.calibre backfill & document metadata fallback
 -- ---------------------------------------------------------------------------
 
--- Loads metadata.calibre reachable from `dir` and returns a lookup table
--- keyed by the book's absolute path: { [fullpath] = {title, authors,
--- series, series_index, keywords}, ... }. Returns false when none exists.
+local function findCalibreDir(start_path)
+    if not start_path or start_path == "" then return nil end
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if not (ok_lfs and lfs) then return nil end
+
+    local function hasMeta(dir)
+        return (lfs.attributes(dir .. "/metadata.calibre", "mode") == "file") or
+               (lfs.attributes(dir .. "/.metadata.calibre", "mode") == "file")
+    end
+
+    local dir = start_path
+    if lfs.attributes(dir, "mode") == "file" then
+        dir = dir:match("^(.-)/[^/]+$")
+    end
+
+    while dir and dir ~= "" and dir ~= "/" do
+        if hasMeta(dir) then return dir end
+        dir = dir:match("^(.-)/[^/]+$")
+    end
+
+    if G_reader_settings then
+        local home = G_reader_settings:readSetting("home_dir")
+        if home and hasMeta(home) then return home end
+    end
+
+    for _, root in ipairs({ "/mnt/us", "/mnt/onboard", "/mnt/sd" }) do
+        if hasMeta(root) then return root end
+    end
+
+    return nil
+end
+
+local function extractYearFromOpf(opf_text)
+    if not opf_text then return nil end
+    local pub_date = opf_text:match("<dc:date[^>]-event=[\"']publication[\"'][^>]*>([^<]+)</dc:date>")
+    if not pub_date then
+        pub_date = opf_text:match("<meta[^>]-property=[\"']dcterms:issued[\"'][^>]*>([^<]+)</meta>")
+    end
+    if not pub_date then
+        pub_date = opf_text:match("<dc:date[^>]*>([^<]+)</dc:date>")
+    end
+    if pub_date then
+        local y = pub_date:match("(%d%d%d%d)")
+        if y then
+            local num = tonumber(y)
+            if num and num > 0 and num < 3000 then return num end
+        end
+    end
+    return nil
+end
+
+local function readDocYear(filepath)
+    if not filepath or type(filepath) ~= "string" then return nil end
+    if _doc_year_cache[filepath] ~= nil then
+        return _doc_year_cache[filepath] or nil
+    end
+
+    local year = nil
+    if filepath:lower():match("%.epub$") then
+        local ok_arc, Archiver = pcall(require, "ffi/archiver")
+        if ok_arc and Archiver and Archiver.Reader then
+            local reader = Archiver.Reader:new()
+            local ok_open = pcall(function() return reader:open(filepath) end)
+            if ok_open and reader then
+                pcall(function()
+                    for entry in reader:iterate() do
+                        if entry.mode == "file" and entry.path:lower():match("%.opf$") then
+                            local content = reader:extractToMemory(entry.path)
+                            if content then
+                                year = extractYearFromOpf(content)
+                                if year then break end
+                            end
+                        end
+                    end
+                end)
+                pcall(function() reader:close() end)
+            end
+        end
+    end
+
+    _doc_year_cache[filepath] = year or false
+    return year
+end
+
+-- Loads metadata.calibre reachable from `dir` directly from JSON and returns a lookup table
+-- keyed by full path and filename: { [fullpath] = {title, authors, series, series_index,
+-- keywords, pubdate, pub_year}, ... }. Returns false when none exists.
 -- Cached for the session (per base_dir actually queried).
 local function loadCalibreIndex(dir)
-    local cached = _calibre_index_cache:get(dir)
+    local base = findCalibreDir(dir) or dir
+    local cached = _calibre_index_cache:get(base)
     if cached ~= nil then return cached end
 
-    local ok_cm, CalibreMetadata = pcall(require, "metadata")
-    if not ok_cm or not CalibreMetadata or type(CalibreMetadata.loadBookList) ~= "function" then
-        _calibre_index_cache:put(dir, false)
+    local file_path = nil
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if ok_lfs and lfs then
+        if lfs.attributes(base .. "/metadata.calibre", "mode") == "file" then
+            file_path = base .. "/metadata.calibre"
+        elseif lfs.attributes(base .. "/.metadata.calibre", "mode") == "file" then
+            file_path = base .. "/.metadata.calibre"
+        end
+    end
+
+    if not file_path then
+        _calibre_index_cache:put(base, false)
         return false
     end
 
-    local cm = setmetatable({}, { __index = CalibreMetadata })
-    cm.drive = {}
-    cm.books = {}
+    local raw = nil
+    local ok_rj, rapidjson = pcall(require, "rapidjson")
+    if ok_rj and rapidjson and type(rapidjson.load) == "function" then
+        pcall(function() raw = rapidjson.load(file_path) end)
+    end
+    if not raw then
+        local ok_json, json = pcall(require, "json")
+        if ok_json and json and type(json.decode) == "function" then
+            pcall(function()
+                local f = io.open(file_path, "r")
+                if f then
+                    local content = f:read("*all")
+                    f:close()
+                    if content then raw = json.decode(content) end
+                end
+            end)
+        end
+    end
 
-    local ok_init, result = pcall(function() return cm:init(dir, true) end)
-    if not ok_init or not result then
-        cm:clean()
-        _calibre_index_cache:put(dir, false)
+    if not raw then
+        _calibre_index_cache:put(base, false)
+        return false
+    end
+
+    local books = raw.books or (type(raw) == "table" and raw)
+    if type(books) ~= "table" then
+        _calibre_index_cache:put(base, false)
         return false
     end
 
     local index = {}
-    for _, book in ipairs(cm.books) do
-        local lpath = book.lpath
+    for _, b in ipairs(books) do
+        local lpath = b.lpath
         if lpath and type(lpath) == "string" then
-            local fullpath = dir .. "/" .. lpath
-
-            local authors_str
-            if type(book.authors) == "table" and #book.authors > 0 then
-                authors_str = table.concat(book.authors, "\n")
+            local norm_lpath = lpath:gsub("\\", "/")
+            while #norm_lpath > 0 and norm_lpath:sub(1, 1) == "/" do
+                norm_lpath = norm_lpath:sub(2)
             end
-            local keywords_str
-            if type(book.tags) == "table" and #book.tags > 0 then
-                keywords_str = table.concat(book.tags, "\n")
-            end
-            local series = (type(book.series) == "string") and book.series or nil
-            local series_index = (type(book.series_index) == "number") and book.series_index or nil
-            local title = (type(book.title) == "string") and book.title or nil
+            local fullpath = base .. "/" .. norm_lpath
 
+            local authors_str = nil
+            if type(b.authors) == "table" and #b.authors > 0 then
+                authors_str = table.concat(b.authors, "\n")
+            elseif type(b.authors) == "string" and b.authors ~= "" then
+                authors_str = b.authors
+            end
+
+            local keywords_str = nil
+            if type(b.tags) == "table" and #b.tags > 0 then
+                local valid = {}
+                for _, tag in ipairs(b.tags) do
+                    if type(tag) == "string" and tag ~= "" and not tag:match("^PLUGBOARD TEMPLATE ERROR") then
+                        valid[#valid + 1] = tag
+                    end
+                end
+                if #valid > 0 then
+                    keywords_str = table.concat(valid, "\n")
+                end
+            elseif type(b.tags) == "string" and b.tags ~= "" then
+                if not b.tags:match("^PLUGBOARD TEMPLATE ERROR") then
+                    keywords_str = b.tags
+                end
+            end
+
+            local series = (type(b.series) == "string" and b.series ~= "") and b.series or nil
+            local series_index = (type(b.series_index) == "number") and b.series_index or nil
+            local title = (type(b.title) == "string" and b.title ~= "") and b.title or nil
+
+            local pubdate_str = (type(b.pubdate) == "string" and b.pubdate)
+                             or (type(b.date) == "string" and b.date)
+                             or (type(b.timestamp) == "string" and b.timestamp)
             local pub_year = nil
-            if type(book.pubdate) == "string" then
-                local y = book.pubdate:match("(%d%d%d%d)")
-                if y then pub_year = tonumber(y) end
-            end
-            if not pub_year and type(book.date) == "string" then
-                local y = book.date:match("(%d%d%d%d)")
-                if y then pub_year = tonumber(y) end
+            if pubdate_str then
+                local y = pubdate_str:match("(%d%d%d%d)")
+                if y then
+                    local num = tonumber(y)
+                    if num and num > 0 and num < 3000 then pub_year = num end
+                end
             end
 
-            index[fullpath] = {
-                title = title, authors = authors_str, series = series,
-                series_index = series_index, keywords = keywords_str,
-                pubdate = book.pubdate, pub_year = pub_year,
+            local item = {
+                title = title,
+                authors = authors_str,
+                series = series,
+                series_index = series_index,
+                keywords = keywords_str,
+                pubdate = pubdate_str,
+                pub_year = pub_year,
             }
+            index[fullpath] = item
+            local fname = fullpath:match("([^/]+)$")
+            if fname and not index[fname] then
+                index[fname] = item
+            end
         end
     end
-    cm:clean()
 
     index = next(index) and index or false
-    _calibre_index_cache:put(dir, index)
+    _calibre_index_cache:put(base, index)
     return index
 end
 
@@ -196,6 +342,20 @@ end
 
 local function nonEmpty(value)
     if value ~= nil and value ~= "" then return value end
+end
+
+local function cleanKeywords(raw)
+    if not raw or raw == "" then return nil end
+    local valid = {}
+    for token in raw:gmatch("[^\n]+") do
+        if not token:match("^PLUGBOARD TEMPLATE ERROR") then
+            valid[#valid + 1] = token
+        end
+    end
+    if #valid > 0 then
+        return table.concat(valid, "\n")
+    end
+    return nil
 end
 
 -- Resolves a bookinfo row in place, optionally against its Calibre record.
@@ -224,7 +384,11 @@ local function resolveRow(row, cal)
         row.pub_year = overrides[row[1]]
     end
 
-    row.authors, row.keywords = nonEmpty(row.authors), nonEmpty(row.keywords)
+    if not row.pub_year then
+        row.pub_year = readDocYear(row[1])
+    end
+
+    row.authors, row.keywords = nonEmpty(row.authors), cleanKeywords(row.keywords)
     row.series, row.series_index = name, index
     row.series_key = name and FilterState.seriesKey(name)
 end
@@ -293,13 +457,16 @@ local function fetchScopeRows(bim, base_dir)
     local seen = {}
     for _, row in ipairs(rows) do
         seen[row[1]] = true
-        resolveRow(row, cal_index and cal_index[row[1]])
+        local cal = cal_index and (cal_index[row[1]] or (row[2] and cal_index[row[2]]))
+        resolveRow(row, cal)
     end
 
     if cal_index then
         local extra = {}
         for fullpath in pairs(cal_index) do
-            if not seen[fullpath] then extra[#extra + 1] = fullpath end
+            if fullpath:find("/", 1, true) and not seen[fullpath] then
+                extra[#extra + 1] = fullpath
+            end
         end
         table.sort(extra)
         for _, fullpath in ipairs(extra) do
@@ -533,24 +700,7 @@ end
 -- Publication year overrides
 -- ---------------------------------------------------------------------------
 
-local function findCalibreBase(filepath)
-    local dir = filepath:match("^(.-)/[^/]+$")
-    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-    if not (ok_lfs and lfs) then return nil end
-    while dir and dir ~= "" and dir ~= "/" do
-        if lfs.attributes(dir .. "/metadata.calibre", "mode") == "file" then
-            return dir
-        end
-        dir = dir:match("^(.-)/[^/]+$")
-    end
-    if G_reader_settings then
-        local home = G_reader_settings:readSetting("home_dir")
-        if home and lfs.attributes(home .. "/metadata.calibre", "mode") == "file" then
-            return home
-        end
-    end
-    return nil
-end
+local findCalibreBase = findCalibreDir
 
 function MetadataSource.getBookPubYear(filepath, base_dir)
     if not filepath then return nil end
@@ -566,16 +716,51 @@ function MetadataSource.getBookPubYear(filepath, base_dir)
     if ok_ds and ds then
         local y = ds:readSetting("custom_pub_year")
         if y ~= nil then return tonumber(y) end
+        local props = ds:readSetting("doc_props")
+        if type(props) == "table" and type(props.date) == "string" then
+            local dy = props.date:match("(%d%d%d%d)")
+            if dy then
+                local num = tonumber(dy)
+                if num and num > 0 and num < 3000 then return num end
+            end
+        end
     end
 
-    local bdir = base_dir or findCalibreBase(filepath)
+    local fname = filepath:match("([^/]+)$")
+    local bdir = base_dir or findCalibreDir(filepath) or filepath:match("^(.-)/[^/]+$")
     if bdir then
         local cal_index = loadCalibreIndex(bdir)
-        local cal = cal_index and cal_index[filepath]
+        local cal = cal_index and (cal_index[filepath] or (fname and cal_index[fname]))
         if cal and cal.pub_year then
             return cal.pub_year
         end
     end
+
+    local doc_y = readDocYear(filepath)
+    if doc_y then return doc_y end
+
+    local ok_dr, DocumentRegistry = pcall(require, "document/documentregistry")
+    if ok_dr and DocumentRegistry and DocumentRegistry.openDocument then
+        local ok, doc = pcall(DocumentRegistry.openDocument, DocumentRegistry, filepath)
+        if ok and doc then
+            local props = doc.getProps and doc:getProps()
+            if not props and doc.getDocumentProps then
+                props = doc:getDocumentProps()
+            end
+            if doc.close then pcall(doc.close, doc) end
+            if props then
+                local date_str = props.pubdate or props.date or props.issued
+                if type(date_str) == "string" then
+                    local matched = date_str:match("(%d%d%d%d)")
+                    if matched then
+                        local num = tonumber(matched)
+                        if num and num > 0 and num < 3000 then return num end
+                    end
+                end
+            end
+        end
+    end
+
     return nil
 end
 

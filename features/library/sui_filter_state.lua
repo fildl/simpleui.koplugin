@@ -295,7 +295,16 @@ function FilterState.eachFacetValue(row, definition, fn)
     if raw == nil then
         fn(false, false)
     elseif definition.multi_value then
-        for token in raw:gmatch("[^\n]+") do fn(token, token) end
+        local count = 0
+        for token in raw:gmatch("[^\n]+") do
+            if not token:match("^PLUGBOARD TEMPLATE ERROR") then
+                fn(token, token)
+                count = count + 1
+            end
+        end
+        if count == 0 then
+            fn(false, false)
+        end
     else
         fn(row[definition.key_column or definition.column], raw)
     end

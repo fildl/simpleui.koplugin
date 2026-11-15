@@ -91,6 +91,11 @@ local _VIS_DEFAULTS = {
     sub_menu      = true,
     sub_close     = false,
     sub_back      = true,
+    normal        = false,
+    author        = false,
+    series        = false,
+    tags          = false,
+    nationality   = true,
 }
 
 -- Default side/order configs for FM and injected widgets.

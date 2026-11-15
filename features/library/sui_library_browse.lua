@@ -196,7 +196,7 @@ end
 local _MODE_KEY = "simpleui_browsemeta_mode"
 
 function M.getSavedMode()
-    return SUISettings:readSetting(_MODE_KEY) or "normal"
+    return SUISettings:readSetting(_MODE_KEY) or "nationality"
 end
 
 function M.setSavedMode(mode)

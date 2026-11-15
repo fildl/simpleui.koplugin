@@ -225,6 +225,15 @@ local function _goHome(target_fm)
         home = Device.home_dir
     end
     if not home then return false end
+
+    local ok_bm, BM = pcall(require, "features/library/sui_library_browse")
+    if ok_bm and BM and BM.isEnabled and BM.isEnabled() then
+        local mode = BM.getSavedMode and BM.getSavedMode()
+        if mode and mode ~= "normal" then
+            BM.activateMode(target_fm, mode)
+            return true
+        end
+    end
     -- isInSeriesView/exitSeriesView live in sui_series_grouping.lua, NOT
     -- sui_foldercovers.lua (fixed bug: this used to require the wrong
     -- module, so in_virtual was always false and a series-group view

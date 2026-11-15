@@ -833,19 +833,25 @@ function M.patchFileManagerClass(plugin)
                     plugin.active_action = "home"
                     local home = G_reader_settings:readSetting("home_dir")
                     if home and this.file_chooser then
-                        -- Suppress onPathChanged: replaceBar below handles the bar.
-                        this._navbar_suppress_path_change = true
-                        if this.file_chooser._sui_lazy_listing then
-                            -- Listed once the covering screen exposes it.
-                            this.file_chooser.path = require("ffi/util").realpath(home) or home
-                            this.file_chooser.focused_path = nil
+                        local ok_bm, BM = pcall(require, "features/library/sui_library_browse")
+                        local saved_mode = ok_bm and BM and BM.isEnabled and BM.isEnabled() and BM.getSavedMode()
+                        if saved_mode and saved_mode ~= "normal" then
+                            BM.activateMode(this, saved_mode)
                         else
-                            this.file_chooser:changeToPath(home)
-                        end
-                        this._navbar_suppress_path_change = nil
-                        -- Explicitly clear the subtitle since onPathChanged was skipped.
-                        if this.updateTitleBarPath then
-                            this:updateTitleBarPath(home, true)
+                            -- Suppress onPathChanged: replaceBar below handles the bar.
+                            this._navbar_suppress_path_change = true
+                            if this.file_chooser._sui_lazy_listing then
+                                -- Listed once the covering screen exposes it.
+                                this.file_chooser.path = require("ffi/util").realpath(home) or home
+                                this.file_chooser.focused_path = nil
+                            else
+                                this.file_chooser:changeToPath(home)
+                            end
+                            this._navbar_suppress_path_change = nil
+                            -- Explicitly clear the subtitle since onPathChanged was skipped.
+                            if this.updateTitleBarPath then
+                                this:updateTitleBarPath(home, true)
+                            end
                         end
                     end
                 end
@@ -4619,11 +4625,17 @@ function M.closeReaderToLibrary(plugin)
             home = require("device").home_dir
         end
         if home and fm_ref.file_chooser then
-            fm_ref._navbar_suppress_path_change = true
-            fm_ref.file_chooser:changeToPath(home)
-            fm_ref._navbar_suppress_path_change = nil
-            if fm_ref.updateTitleBarPath then
-                pcall(function() fm_ref:updateTitleBarPath(home, true) end)
+            local ok_bm, BM = pcall(require, "features/library/sui_library_browse")
+            local saved_mode = ok_bm and BM and BM.isEnabled and BM.isEnabled() and BM.getSavedMode()
+            if saved_mode and saved_mode ~= "normal" then
+                BM.activateMode(fm_ref, saved_mode)
+            else
+                fm_ref._navbar_suppress_path_change = true
+                fm_ref.file_chooser:changeToPath(home)
+                fm_ref._navbar_suppress_path_change = nil
+                if fm_ref.updateTitleBarPath then
+                    pcall(function() fm_ref:updateTitleBarPath(home, true) end)
+                end
             end
         elseif fm_ref.file_chooser then
             fm_ref.file_chooser:refreshPath()
