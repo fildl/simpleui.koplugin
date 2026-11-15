@@ -69,14 +69,14 @@ local DIM_LABELS = {
     author      = _("Authors"),
     series      = _("Series"),
     tags        = _("Tags"),
-    nationality = _("Nationality"),
+    nationality = _("Library"),
 }
 
 -- Ordered browse modes: the filesystem view followed by every metadata dimension.
 M.MODES = { "normal", "author", "series", "tags", "nationality" }
 
 function M.getModeLabel(mode)
-    if mode == "normal" then return _("Library") end
+    if mode == "normal" then return _("Folders") end
     return DIM_LABELS[mode]
 end
 
