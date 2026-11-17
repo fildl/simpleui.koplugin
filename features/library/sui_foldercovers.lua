@@ -439,9 +439,15 @@ local function _planFolderCover(item, BookInfoManager, slots, depth, lead)
     return CoverFinder.planDir(menu, entry.path, slots, depth, BookInfoManager, lead)
 end
 
--- The static `.cover.*` image of a real folder as { file, w, h }, or nil.
-local function _dotCoverImage(dir_path)
-    local cover_file = CoverFinder.findDotCover(dir_path)
+-- The static `.cover.*` image of a real folder or custom cover for virtual folder as { file, w, h }, or nil.
+local function _folderCustomCover(dir_path, entry)
+    local cover_file = nil
+    if _isRealFolder(entry) then
+        cover_file = CoverFinder.findDotCover(dir_path)
+    end
+    if not cover_file then
+        cover_file = CoverFinder.findCustomCover(dir_path, entry)
+    end
     if not cover_file then return nil end
     local ok, w, h = pcall(function()
         local tmp = ImageWidget:new{ file = cover_file, scale_factor = 1 }
@@ -453,6 +459,7 @@ local function _dotCoverImage(dir_path)
     end)
     if ok and w and h then return { file = cover_file, w = w, h = h } end
 end
+local _dotCoverImage = _folderCustomCover
 
 -- Resolve the effective folder style for dir_path.
 -- "auto" counts books and returns "quad" (>=4) or "single" (<4).
@@ -1348,8 +1355,8 @@ function M.install()
         -- A user-picked book leads a single cover and takes precedence over a
         -- static image; in quad the static image takes precedence.
         local lead = not quad and CoverOverrides.get(dir_path, true) or nil
-        if not lead and _isRealFolder(self.entry) then
-            local image = _dotCoverImage(dir_path)
+        if not lead then
+            local image = _folderCustomCover(dir_path, self.entry)
             if image then
                 self:_setFolderCover(image, display)
                 return
@@ -1774,8 +1781,9 @@ function M.install()
 
             -- A user-picked book leads and takes precedence over a static image.
             local lead = CoverOverrides.get(dir_path, true)
-            if not lead and _isRealFolder(entry) then
-                local cover_file = CoverFinder.findDotCover(dir_path)
+            if not lead then
+                local cover_file = (_isRealFolder(entry) and CoverFinder.findDotCover(dir_path))
+                    or CoverFinder.findCustomCover(dir_path, entry)
                 if cover_file then
                     local ok, img = pcall(function()
                         local iw = ImageWidget:new{ file = cover_file, scale_factor = 1 }

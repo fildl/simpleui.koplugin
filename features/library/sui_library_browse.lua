@@ -503,6 +503,9 @@ local function _facetFolder(fc, base_dir, filter_state, dimension, entry, index,
     item.virtual_leaf_count   = count
     item.cover_paths          = first_paths
     item.first_year           = first_year
+    item.virtual_base_dir     = base_dir
+    item.virtual_dimension    = dimension
+    item.virtual_value        = value
     return item
 end
 

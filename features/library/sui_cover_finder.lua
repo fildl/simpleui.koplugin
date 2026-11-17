@@ -61,9 +61,10 @@ local function newLru(max)
 end
 
 local _DIR_CACHE_MAX = 300
-local _dot_covers = newLru(_DIR_CACHE_MAX) -- [dir] = { mtime=, file= }
-local _summaries  = newLru(64)             -- [dir] = { key=, books=, dirs= }
-local _misses     = newLru(_DIR_CACHE_MAX) -- [dir .. "\0" .. tag] = stamp
+local _dot_covers    = newLru(_DIR_CACHE_MAX) -- [dir] = { mtime=, file= }
+local _custom_covers = newLru(_DIR_CACHE_MAX) -- [vpath] = file or false
+local _summaries     = newLru(64)             -- [dir] = { key=, books=, dirs= }
+local _misses        = newLru(_DIR_CACHE_MAX) -- [dir .. "\0" .. tag] = stamp
 
 function CoverFinder.clearListings()
     _summaries.clear()
@@ -72,6 +73,7 @@ end
 
 function CoverFinder.clearCache()
     _dot_covers.clear()
+    _custom_covers.clear()
     _summaries.clear()
     _misses.clear()
 end
@@ -118,7 +120,7 @@ end
 -- Dot cover
 -- ---------------------------------------------------------------------------
 
-local _COVER_EXTS = { ".jpg", ".jpeg", ".png", ".webp", ".gif" }
+local _COVER_EXTS = { ".jpg", ".jpeg", ".png", ".webp", ".gif", ".JPG", ".JPEG", ".PNG" }
 
 -- Returns the path to a .cover.* file in dir_path, or nil.
 function CoverFinder.findDotCover(dir_path)
@@ -136,6 +138,100 @@ function CoverFinder.findDotCover(dir_path)
     end
     _dot_covers.set(dir_path, { mtime = mtime, file = found })
     return found or nil
+end
+
+-- Returns the path to a custom cover image file for a virtual folder (e.g.
+-- nationality, author), or nil.
+function CoverFinder.findCustomCover(dir_path, entry)
+    if not dir_path then return nil end
+    local cached = _custom_covers.get(dir_path)
+    if cached ~= nil then return cached or nil end
+
+    local base_dir = entry and entry.virtual_base_dir
+    local dimension = entry and entry.virtual_dimension
+    local value = entry and entry.virtual_value
+
+    if not (dimension and value and base_dir) then
+        local ok_vp, VirtualPath = pcall(require, "features/library/sui_virtual_path")
+        if ok_vp and VirtualPath and VirtualPath.isVirtual(dir_path) then
+            local b, state = VirtualPath.parse(dir_path)
+            base_dir = base_dir or b
+            local trail = state and state.trail or {}
+            local last = trail[#trail]
+            if last and last.value ~= false then
+                dimension = dimension or last.dimension
+                value = value or tostring(last.value)
+            end
+        end
+    end
+
+    local base_dirs = {}
+    local function addBase(dir)
+        if dir and dir ~= "" then
+            local clean = dir:gsub("/+$", "")
+            for _, b in ipairs(base_dirs) do
+                if b == clean then return end
+            end
+            base_dirs[#base_dirs + 1] = clean
+        end
+    end
+
+    addBase(base_dir)
+    if G_reader_settings then
+        addBase(G_reader_settings:readSetting("home_dir"))
+    end
+    local ok_dev, dev = pcall(require, "device")
+    if ok_dev and dev then addBase(dev.home_dir) end
+
+    if not value and dir_path then
+        value = (entry and entry.text) or dir_path:match("([^/]+)/*$")
+    end
+
+    if #base_dirs == 0 or not value then
+        _custom_covers.set(dir_path, false)
+        return nil
+    end
+
+    local val_str = tostring(value)
+    local variants = { val_str, val_str:lower() }
+    local underscore_val = val_str:gsub(" ", "_")
+    if underscore_val ~= val_str then
+        variants[#variants + 1] = underscore_val
+        variants[#variants + 1] = underscore_val:lower()
+    end
+
+    local candidates = {}
+    for _, bdir in ipairs(base_dirs) do
+        for _, v in ipairs(variants) do
+            if dimension then
+                candidates[#candidates + 1] = bdir .. "/covers/" .. dimension .. "/" .. v
+                candidates[#candidates + 1] = bdir .. "/.covers/" .. dimension .. "/" .. v
+            end
+            candidates[#candidates + 1] = bdir .. "/covers/" .. v
+            candidates[#candidates + 1] = bdir .. "/.covers/" .. v
+            candidates[#candidates + 1] = bdir .. "/" .. v .. "/.cover"
+            candidates[#candidates + 1] = bdir .. "/" .. v .. "/cover"
+            if dimension then
+                candidates[#candidates + 1] = bdir .. "/covers/" .. dimension .. "/" .. v .. "/.cover"
+                candidates[#candidates + 1] = bdir .. "/covers/" .. dimension .. "/" .. v .. "/cover"
+            end
+        end
+    end
+
+    local found = nil
+    for _, prefix in ipairs(candidates) do
+        for _, ext in ipairs(_COVER_EXTS) do
+            local candidate = prefix .. ext
+            if lfs.attributes(candidate, "mode") == "file" then
+                found = candidate
+                break
+            end
+        end
+        if found then break end
+    end
+
+    _custom_covers.set(dir_path, found or false)
+    return found
 end
 
 -- ---------------------------------------------------------------------------
