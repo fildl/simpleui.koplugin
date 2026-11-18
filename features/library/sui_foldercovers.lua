@@ -461,15 +461,7 @@ local function _folderCustomCover(dir_path, entry)
         cover_file = CoverFinder.findCustomCover(dir_path, entry)
     end
     if not cover_file then return nil end
-    local ok, w, h = pcall(function()
-        local tmp = ImageWidget:new{ file = cover_file, scale_factor = 1 }
-        tmp:_render()
-        local ow = tmp:getOriginalWidth()
-        local oh = tmp:getOriginalHeight()
-        tmp:free()
-        return ow, oh
-    end)
-    if ok and w and h then return { file = cover_file, w = w, h = h } end
+    return { file = cover_file }
 end
 local _dotCoverImage = _folderCustomCover
 

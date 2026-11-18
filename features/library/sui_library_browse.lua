@@ -963,7 +963,11 @@ local function _installPatches()
         FileChooser.refreshPath = function(fc)
             -- Listing the path already shown picks up library changes, so the
             -- cached metadata is dropped; moving to another path keeps it.
-            if fc._sui_listed_path == fc.path then MetadataSource.clearCache() end
+            if fc._sui_listed_path == fc.path then
+                MetadataSource.clearCache()
+                local ok_cf, CoverFinder = pcall(require, "features/library/sui_cover_finder")
+                if ok_cf and CoverFinder then CoverFinder.clearCache() end
+            end
             fc._sui_listed_path = fc.path
             return orig(fc)
         end

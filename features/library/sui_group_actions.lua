@@ -60,8 +60,16 @@ function GroupActions.openCoverPicker(args)
         if args.on_change then args.on_change() end
     end
 
+    local ok_cf, CoverFinder = pcall(require, "features/library/sui_cover_finder")
+    local custom_file = nil
+    if ok_cf and CoverFinder and override_key then
+        custom_file = (CoverFinder.findCustomCover and CoverFinder.findCustomCover(override_key))
+            or (CoverFinder.findDotCover and CoverFinder.findDotCover(override_key))
+    end
+    local auto_text = custom_file and _("Custom image") or _("Auto (first book)")
+
     local items = {{
-        text     = _("Auto (first book)"),
+        text     = auto_text,
         checked  = not cur_override,
         callback = function() applyOverride(nil) end,
     }}

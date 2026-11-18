@@ -145,7 +145,7 @@ end
 function CoverFinder.findCustomCover(dir_path, entry)
     if not dir_path then return nil end
     local cached = _custom_covers.get(dir_path)
-    if cached ~= nil then return cached or nil end
+    if cached then return cached end
 
     local base_dir = entry and entry.virtual_base_dir
     local dimension = entry and entry.virtual_dimension
@@ -167,7 +167,7 @@ function CoverFinder.findCustomCover(dir_path, entry)
 
     local base_dirs = {}
     local function addBase(dir)
-        if dir and dir ~= "" then
+        if dir and type(dir) == "string" and dir ~= "" then
             local clean = dir:gsub("/+$", "")
             for _, b in ipairs(base_dirs) do
                 if b == clean then return end
@@ -177,18 +177,30 @@ function CoverFinder.findCustomCover(dir_path, entry)
     end
 
     addBase(base_dir)
+    if base_dir then
+        local p = base_dir:match("^(.+)/[^/]+$")
+        if p then addBase(p) end
+    end
     if G_reader_settings then
-        addBase(G_reader_settings:readSetting("home_dir"))
+        local h = G_reader_settings:readSetting("home_dir")
+        addBase(h)
+        if h then
+            local hp = h:match("^(.+)/[^/]+$")
+            if hp then addBase(hp) end
+        end
     end
     local ok_dev, dev = pcall(require, "device")
     if ok_dev and dev then addBase(dev.home_dir) end
+    addBase("/mnt/us/documents")
+    addBase("/mnt/us")
+    addBase("/mnt/onboard/documents")
+    addBase("/mnt/onboard")
 
     if not value and dir_path then
         value = (entry and entry.text) or dir_path:match("([^/]+)/*$")
     end
 
     if #base_dirs == 0 or not value then
-        _custom_covers.set(dir_path, false)
         return nil
     end
 
@@ -230,7 +242,37 @@ function CoverFinder.findCustomCover(dir_path, entry)
         if found then break end
     end
 
-    _custom_covers.set(dir_path, found or false)
+    -- Directory scan fallback (fuzzy match in covers/<dimension>)
+    if not found and dimension then
+        for _, bdir in ipairs(base_dirs) do
+            local dpath = bdir .. "/covers/" .. dimension
+            if lfs.attributes(dpath, "mode") == "directory" then
+                for fname in lfs.dir(dpath) do
+                    if fname ~= "." and fname ~= ".." then
+                        local f_lower = fname:lower()
+                        local f_base = f_lower:match("^(.+)%.[^%.]+$") or f_lower
+                        local f_base2 = f_base:match("^(.+)%.[^%.]+$") or f_base
+                        for _, v in ipairs(variants) do
+                            local vl = v:lower()
+                            if f_base == vl or f_base2 == vl or f_base:gsub("_", " ") == vl then
+                                local full = dpath .. "/" .. fname
+                                if lfs.attributes(full, "mode") == "file" then
+                                    found = full
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    if found then break end
+                end
+            end
+            if found then break end
+        end
+    end
+
+    if found then
+        _custom_covers.set(dir_path, found)
+    end
     return found
 end
 
