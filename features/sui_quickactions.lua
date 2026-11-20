@@ -230,6 +230,7 @@ local function _goHome(target_fm)
         if BM.isEnabled and BM.isEnabled() then
             local mode = BM.getSavedMode and BM.getSavedMode()
             if mode and mode ~= "normal" then
+                fc.path = home
                 BM.activateMode(target_fm, mode)
                 return true
             end

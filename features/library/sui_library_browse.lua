@@ -99,6 +99,20 @@ for _i, mode in ipairs(M.MODES) do
     end
 end
 
+-- Resolves the true library root (home_dir), guaranteeing that library-wide
+-- browsing never inherits a transient book subfolder.
+local function _libraryRoot(fc)
+    local home = LibraryScan.resolveHomeDir()
+    if not home or home == "" then
+        home = G_reader_settings and G_reader_settings:readSetting("home_dir")
+    end
+    if not home or home == "" then
+        local ok_dev, dev = pcall(require, "device")
+        if ok_dev and dev then home = dev.home_dir end
+    end
+    return home or "/"
+end
+
 -- ---------------------------------------------------------------------------
 -- Module state
 -- ---------------------------------------------------------------------------
@@ -279,7 +293,7 @@ function M.navigateTo(fm, mode)
     local fc = fm and fm.file_chooser
     if not fc then return end
 
-    local base = VirtualPath.getBaseDir(fc.path)
+    local base = _libraryRoot(fc)
 
     if mode == "normal" then
         M.exitToNormal(fc, fm)
@@ -345,7 +359,7 @@ end
 -- tapping the Library tab going back to home_dir page 1.
 function M.navigateToRoot(fc, fm, mode)
     if not fc or not mode then return end
-    local base   = VirtualPath.getBaseDir(fc.path)
+    local base   = _libraryRoot(fc)
     local target = VirtualPath.buildDimList(base, nil, mode)
     -- Re-set the entry path so the up button stays hidden at this level.
     fc._browse_by_meta_entry_path = target
@@ -403,7 +417,7 @@ end
 -- should go to page 1 in place, or navigate up.
 function M.isAtVirtualRoot(fc, mode)
     if not fc or not mode then return false end
-    local base   = VirtualPath.getBaseDir(fc.path)
+    local base   = _libraryRoot(fc)
     local target = VirtualPath.buildDimList(base, nil, mode)
     return fc.path == target
 end
@@ -430,7 +444,7 @@ end
 -- Returns the number of books by *author_name* under the current FM base_dir.
 function M.getAuthorBookCount(fc, author_name)
     if not fc or not author_name or author_name == "" then return 0 end
-    local base = VirtualPath.getBaseDir(fc.path)
+    local base = _libraryRoot(fc)
     if not base then return 0 end
     _ensureCacheBaseDir(base)
 
@@ -462,9 +476,9 @@ function M.navigateToLeaf(fm, dimension, value, opts)
     if not (fc and FilterState.isDimension(dimension) and value and value ~= "") then return end
     opts = opts or {}
 
+    local base = opts.base_dir or _libraryRoot(fc)
     local fc_base = VirtualPath.getBaseDir(fc.path)
-    local base    = opts.base_dir or fc_base
-    local prefix  = opts.filter_state
+    local prefix = opts.filter_state
     local target  = VirtualPath.buildLeaf(base, prefix, dimension, value)
     local first   = prefix and prefix.trail[1]
     local mode    = first and first.dimension or dimension
@@ -714,6 +728,10 @@ local function _getVirtualList(fc, path, collate)
     -- VirtualPath.parse's docstring) — at "file_list" it is nil BY DESIGN,
     -- because the trail is already fully resolved.
     if not base_dir then return dirs, files end
+    local root = _libraryRoot(fc)
+    if active_dimension == "nationality" or (filter_state and FilterState.entryDimension(filter_state) == "nationality") then
+        base_dir = root
+    end
     if level == "dim_list" and not active_dimension then return dirs, files end
     _ensureCacheBaseDir(base_dir)
 

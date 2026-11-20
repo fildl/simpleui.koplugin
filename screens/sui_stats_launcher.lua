@@ -51,8 +51,42 @@ end
 function Launcher.open(id, opts)
     local window = assert(STATS_WINDOWS[id], "unknown statistics window: " .. tostring(id))
     local notice = window.notice ~= false and showLoadingNotice() or nil
-    local result = require(window.module)[window.show](opts)
+
+    if package.loaded[window.module] == false then
+        package.loaded[window.module] = nil
+    end
+
+    local ok_mod, mod = pcall(require, window.module)
+    if not ok_mod then
+        UI.Notify.close(notice)
+        package.loaded[window.module] = nil
+        local err_str = tostring(mod)
+        local logger = require("logger")
+        logger.err("sui_stats_launcher: error loading module", window.module, err_str)
+        UI.Notify.toast("Stats error: " .. err_str)
+        error(err_str)
+    end
+
+    local fn = mod and mod[window.show]
+    if type(fn) ~= "function" then
+        UI.Notify.close(notice)
+        local err_str = "function " .. tostring(window.show) .. " not found in " .. tostring(window.module)
+        local logger = require("logger")
+        logger.err("sui_stats_launcher:", err_str)
+        UI.Notify.toast("Stats error: " .. err_str)
+        error(err_str)
+    end
+
+    local ok_res, result = pcall(fn, opts)
     UI.Notify.close(notice)
+    if not ok_res then
+        local err_str = tostring(result)
+        local logger = require("logger")
+        logger.err("sui_stats_launcher: error running", window.show, err_str)
+        UI.Notify.toast("Stats error: " .. err_str)
+        error(err_str)
+    end
+
     return result
 end
 

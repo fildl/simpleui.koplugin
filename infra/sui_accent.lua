@@ -230,6 +230,8 @@ function Accent.color()
     return state and state.color
 end
 
+Accent.accentColor = Accent.color
+
 function Accent.secondaryColor()
     local state = resolveSecondary()
     return state and state.color

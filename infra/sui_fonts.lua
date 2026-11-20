@@ -82,6 +82,15 @@ local function linkBoldVariant(family)
     local Font = require("ui/font")
     Font.bold_font_variant[family.regular] = family.bold
     Font.regular_font_variant[family.bold] = family.regular
+
+    -- Link both with and without leading "./" so variant lookup never misses
+    local rel_reg = family.regular:match("(plugins/simpleui%.koplugin/.*)")
+    if rel_reg then
+        Font.bold_font_variant[rel_reg] = family.bold
+        Font.regular_font_variant[rel_reg] = family.regular
+        Font.bold_font_variant["./" .. rel_reg] = family.bold
+        Font.regular_font_variant["./" .. rel_reg] = family.regular
+    end
 end
 
 --- Registers the bundled families. Idempotent; safe to call on every start.

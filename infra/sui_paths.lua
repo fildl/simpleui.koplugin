@@ -45,6 +45,10 @@ function M.getPluginDir(level)
         dir = path:match("^(.+/)[^/]+/[^/]+$") or "./"
     end
 
+    dir = dir:gsub("/+$", "") .. "/"
+    if not dir:match("^/") and not dir:match("^%./") then
+        dir = "./" .. dir
+    end
     _cached_dir = dir
     return dir
 end

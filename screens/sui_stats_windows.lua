@@ -2107,11 +2107,28 @@ local function _smDayCell(SZ, cell_w, cell_h, is_counted, is_frozen, is_run)
         if is_frozen or is_run then
             local icon_char = is_frozen and _SM_FROZEN_ICON or _SM_STREAK_ICON
             local icon_clr  = SUIStyle.accentFg(SUIStyle.COLOR.surface)
-            content = UI.makeColoredText{
-                text    = icon_char,
-                face    = face_icon,
-                fgcolor = icon_clr,
-            }
+            local stat_slot = is_frozen and "sui_stat_freeze" or "sui_stat_streak"
+            local override = SUIStyle.getIcon and SUIStyle.getIcon(stat_slot)
+            if override then
+                local safe_file = SUIStyle.safeIconPath and SUIStyle.safeIconPath(override, nil) or override
+                local ImageWidget = require("ui/widget/imagewidget")
+                local sz = math.max(8, diameter - 4)
+                local inner = ImageWidget:new{
+                    file = safe_file,
+                    width = sz,
+                    height = sz,
+                    is_icon = true,
+                    alpha = true,
+                    original_in_nightmode = true,
+                }
+                content = UI.makeAlphaMaskWidget(inner, icon_clr, Geom:new{ w = sz, h = sz })
+            else
+                content = UI.makeColoredText{
+                    text    = icon_char,
+                    face    = face_icon,
+                    fgcolor = icon_clr,
+                }
+            end
         end
     end
 

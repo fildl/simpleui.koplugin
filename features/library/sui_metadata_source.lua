@@ -187,10 +187,35 @@ local function readDocYear(filepath)
 
     local year = nil
     if filepath:lower():match("%.epub$") then
+        local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+        local target = filepath
+
+        -- If file does not exist at filepath, check cross-mount (/mnt/us <-> /mnt/base-us)
+        if ok_lfs and lfs then
+            if lfs.attributes(target, "mode") ~= "file" then
+                if target:sub(1, 8) == "/mnt/us/" then
+                    local alt = "/mnt/base-us/" .. target:sub(9)
+                    if lfs.attributes(alt, "mode") == "file" then
+                        target = alt
+                    end
+                elseif target:sub(1, 13) == "/mnt/base-us/" then
+                    local alt = "/mnt/us/" .. target:sub(14)
+                    if lfs.attributes(alt, "mode") == "file" then
+                        target = alt
+                    end
+                end
+            end
+            -- If still not a file on disk, do not invoke libarchive (prevents terminal error spam)
+            if lfs.attributes(target, "mode") ~= "file" then
+                _doc_year_cache[filepath] = false
+                return nil
+            end
+        end
+
         local ok_arc, Archiver = pcall(require, "ffi/archiver")
         if ok_arc and Archiver and Archiver.Reader then
             local reader = Archiver.Reader:new()
-            local ok_open = pcall(function() return reader:open(filepath) end)
+            local ok_open = pcall(function() return reader:open(target) end)
             if ok_open and reader then
                 pcall(function()
                     for entry in reader:iterate() do

@@ -822,6 +822,7 @@ function M.patchFileManagerClass(plugin)
                         local ok_bm, BM = pcall(require, "features/library/sui_library_browse")
                         local saved_mode = ok_bm and BM and BM.isEnabled and BM.isEnabled() and BM.getSavedMode()
                         if saved_mode and saved_mode ~= "normal" then
+                            if this.file_chooser then this.file_chooser.path = home end
                             BM.activateMode(this, saved_mode)
                         else
                             -- The flat view is the Library tab's home.
@@ -3983,51 +3984,154 @@ end
 -- restart — the scale is captured once, at install time.
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- Direct Font Paths (Backport PR #15873)
+-- ---------------------------------------------------------------------------
+-- In KOReader builds prior to PR #15873 (merged Aug 2026), Font:getFace()
+-- unconditionally prepends FontList.fontdir ("./fonts/") to realname, which
+-- turns direct font paths into './fonts//mnt/us/...' or './fonts/plugins/...'.
+-- FreeType fails with error code 1 and TextWidget crashes on a nil face.
+-- Wrapping Freetype.newFaceSize cleans these prepended prefixes before FreeType
+-- tries to open the file, restoring full path support across all KOReader versions.
+function M.patchFreetype(plugin)
+    local ok_ft, Freetype = pcall(require, "ffi/freetype")
+    if not (ok_ft and Freetype and Freetype.newFaceSize) then return end
+    if Freetype._simpleui_path_fixed then return end
+    Freetype._simpleui_path_fixed = true
+
+    local orig_newFaceSize = Freetype.newFaceSize
+    Freetype.newFaceSize = function(path, size, faceindex)
+        if type(path) == "string" then
+            -- 1. Try path as-is first
+            local f = io.open(path, "rb")
+            if f then
+                f:close()
+                return orig_newFaceSize(path, size, faceindex)
+            end
+
+            local candidates = {}
+
+            -- 2. Strip ./fonts/ prepended by pre-PR #15873 KOReader
+            local stripped = path:match("^%./fonts/(.+)$")
+            if stripped then
+                local clean = stripped:gsub("^/+", "/")
+                candidates[#candidates + 1] = clean
+                if not clean:match("^/") and not clean:match("^%./") then
+                    candidates[#candidates + 1] = "./" .. clean
+                end
+            end
+
+            -- 3. Extract relative plugin path (e.g. plugins/simpleui.koplugin/...)
+            local rel = path:match("(plugins/simpleui%.koplugin/.*)$")
+            if rel then
+                candidates[#candidates + 1] = "./" .. rel
+                candidates[#candidates + 1] = rel
+                candidates[#candidates + 1] = "/mnt/base-us/koreader/" .. rel
+                candidates[#candidates + 1] = "/mnt/us/koreader/" .. rel
+            end
+
+            -- 4. Cross-mount swap
+            local from_mnt = path:match("^/mnt/us/(.+)$")
+            if from_mnt then
+                candidates[#candidates + 1] = "/mnt/base-us/" .. from_mnt
+                candidates[#candidates + 1] = "./" .. from_mnt:gsub("^koreader/", "")
+                candidates[#candidates + 1] = from_mnt:gsub("^koreader/", "")
+            end
+            local from_base = path:match("^/mnt/base%-us/(.+)$")
+            if from_base then
+                candidates[#candidates + 1] = "/mnt/us/" .. from_base
+                candidates[#candidates + 1] = "./" .. from_base:gsub("^koreader/", "")
+                candidates[#candidates + 1] = from_base:gsub("^koreader/", "")
+            end
+
+            -- Try first candidate that the OS can open via fopen
+            for _, cand in ipairs(candidates) do
+                local fh = io.open(cand, "rb")
+                if fh then
+                    fh:close()
+                    local ok, res = pcall(orig_newFaceSize, cand, size, faceindex)
+                    if ok and res then return res end
+                end
+            end
+
+            -- Try remaining candidates in case FreeType resolves differently
+            for _, cand in ipairs(candidates) do
+                local ok, res = pcall(orig_newFaceSize, cand, size, faceindex)
+                if ok and res then return res end
+            end
+        end
+
+        return orig_newFaceSize(path, size, faceindex)
+    end
+end
+M.patchFreetype()
+
 local FONT_GETFACE_STATE = "_simpleui_getface"
 
 function M.patchFontGetFace(plugin)
     local Font = require("ui/font")
-    local scale = Config.getFontScalePct() / 100
-    if scale == 1 then return end  -- default: leave getFace fully untouched
-
     local state = _acquireHooks(Font, FONT_GETFACE_STATE, plugin)
     if not state then return end
 
     local orig_getFace = Font.getFace
     Font._simpleui_native_getface = orig_getFace  -- for fixed-box glyph faces
 
-    -- Reentrancy guard: Font:getFace() is not only called top-down by
-    -- widgets — it is also called RECURSIVELY from within itself via
-    -- ui/font.lua's _getFallbackFont(), which core's face_obj.getFallbackFont
-    -- callback exposes to libkoreader-xtext.so. That C module calls this
-    -- callback synchronously (lua_pcall) for every glyph missing from the
-    -- primary font during a single HarfBuzz shaping pass, and each call can
-    -- recurse back into THIS patched getFace for the next fallback candidate.
-    -- This wrapper must therefore never recurse unboundedly: past a fixed
-    -- depth it falls back to the *unpatched* getFace (no scale, no orig_size
-    -- rewrite), so a pathological call pattern degrades to "wrong size"
-    -- instead of "frozen UI".
+    local scale = Config.getFontScalePct() / 100
+
     local MAX_REENTRY_DEPTH = 16
     local depth = 0
 
-    -- Scales the requested size, then restores the caller's pre-scale value
-    -- to face.orig_size: shrink-to-fit loops read it back, decrement it and
-    -- call getFace() again, so it must stay in unscaled units.
+    -- Scales the requested size, and guarantees a safe font fallback so that
+    -- getFace NEVER returns nil to TextWidget, which would cause a LuaJIT crash.
     local function scaledGetFace(self, font, size, faceindex)
+        -- Normalize relative plugin font paths to start with "./" so native KOReader
+        -- does not mistakenly prepend FontList.fontdir ("./fonts/")
+        if type(font) == "string" and font:match("^plugins/simpleui%.koplugin/") then
+            font = "./" .. font
+        end
+
         local sz = size
-        if not sz then sz = self.sizemap[font] end
         local requested = sz
-        if sz then sz = math.max(1, math.floor(sz * scale)) end
-        local face = orig_getFace(self, font, sz, faceindex)
-        if face and face.orig_size ~= requested then
+        if sz and scale ~= 1 then
+            sz = math.max(1, math.floor(sz * scale))
+        elseif not sz and scale ~= 1 then
+            local mapped = self.sizemap and self.sizemap[font]
+            if mapped then
+                sz = math.max(1, math.floor(mapped * scale))
+                requested = mapped
+            end
+        end
+
+        local ok, face = pcall(orig_getFace, self, font, sz, faceindex)
+        if not (ok and face) then
+            face = nil
+            -- Fallback 1: if bold font, try NotoSans bold
+            if font == "tfont" or (type(font) == "string" and font:find("Bold")) then
+                local ok_b, fb_b = pcall(orig_getFace, self, "NotoSans-Bold.ttf", sz, faceindex)
+                if ok_b and fb_b then face = fb_b end
+            end
+            -- Fallback 2: NotoSans-Regular
+            if not face then
+                local ok_r, fb_r = pcall(orig_getFace, self, "NotoSans-Regular.ttf", sz, faceindex)
+                if ok_r and fb_r then face = fb_r end
+            end
+            -- Fallback 3: cfont
+            if not face and self.fontmap and self.fontmap.cfont and font ~= self.fontmap.cfont then
+                local ok_c, fb_c = pcall(orig_getFace, self, self.fontmap.cfont, sz, faceindex)
+                if ok_c and fb_c then face = fb_c end
+            end
+        end
+
+        if face and requested and face.orig_size ~= requested then
             face.orig_size = requested
         end
+
         -- Cached bold clones keep their own orig_size, and sizes that scale to
         -- the same pixel size share one clone: keep it in step with the face.
-        if face and face.hash then
+        if face and face.hash and scale ~= 1 then
             for _i, suffix in ipairs({ "synthbold", "realbold" }) do
-                local clone = self.faces[face.hash .. suffix]
-                if clone then clone.orig_size = face.orig_size end
+                local clone = self.faces and self.faces[face.hash .. suffix]
+                if clone and requested then clone.orig_size = requested end
             end
         end
         return face
@@ -4043,17 +4147,18 @@ function M.patchFontGetFace(plugin)
             return orig_getFace(self, font, size, faceindex)
         end
 
-        -- pcall so any error degrades to the native getFace instead of
-        -- propagating out of a C->Lua callback.
         local ok, result = pcall(scaledGetFace, self, font, size, faceindex)
-
         depth = depth - 1
 
-        if not ok then
-            logger.warn("simpleui/style: Font:getFace patch failed, falling back to native:", result)
-            return orig_getFace(self, font, size, faceindex)
+        if ok and result then
+            return result
         end
-        return result
+
+        -- Emergency: never return nil!
+        local ok_em, em = pcall(orig_getFace, self, "NotoSans-Regular.ttf", size, faceindex)
+        if ok_em and em then return em end
+
+        return orig_getFace(self, font, size, faceindex)
     end
     _trackHooks(state, { { Font, "getFace", orig_getFace } })
 end
@@ -4705,6 +4810,7 @@ function M.closeReaderToLibrary(plugin)
             local ok_bm, BM = pcall(require, "features/library/sui_library_browse")
             local saved_mode = ok_bm and BM and BM.isEnabled and BM.isEnabled() and BM.getSavedMode()
             if saved_mode and saved_mode ~= "normal" then
+                if fm_ref.file_chooser then fm_ref.file_chooser.path = home end
                 BM.activateMode(fm_ref, saved_mode)
             else
                 fm_ref._navbar_suppress_path_change = true
@@ -5447,6 +5553,8 @@ end
 
 function M.installAll(plugin)
     UIManager._simpleui_exiting = nil
+    M.patchFreetype(plugin)
+    M.patchFontGetFace(plugin)
     M.patchPurgeDir(plugin)
     local ok_fm, FileManager = pcall(require, "apps/filemanager/filemanager")
     if ok_fm and FileManager then M.patchDeleteFile(FileManager, plugin) end
@@ -5470,7 +5578,6 @@ function M.installAll(plugin)
     M.patchChoiceDialogs(plugin)
     M.patchHiddenHistory(plugin)
     M.patchInputDialogs(plugin)
-    M.patchFontGetFace(plugin)
     M.patchIconNightColors(plugin)
     M.patchNightMode(plugin)
     -- Register the tab icon step in the shared menu hooks so system icon

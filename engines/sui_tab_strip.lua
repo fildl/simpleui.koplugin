@@ -132,8 +132,21 @@ end
 local function _measureLabel(self, label, max_w)
     local fg      = self.fgcolor
     local regular = TextWidget:new{ text = label, face = self.face, fgcolor = fg, max_width = max_w, padding = 0 }
-    local bold    = TextWidget:new{ text = label, face = self.face, fgcolor = fg, max_width = max_w, padding = 0, bold = true }
-    return regular, bold, math.max(regular:getWidth(), bold:getWidth())
+    local reg_w   = 0
+    pcall(function() reg_w = regular:getWidth() end)
+
+    local bold
+    local bold_w = 0
+    local ok_bold = pcall(function()
+        bold = TextWidget:new{ text = label, face = self.face, fgcolor = fg, max_width = max_w, padding = 0, bold = true }
+        bold_w = bold:getWidth()
+    end)
+    if not ok_bold or not bold or not bold.face then
+        if bold then pcall(function() bold:free() end) end
+        bold = TextWidget:new{ text = label, face = self.face, fgcolor = fg, max_width = max_w, padding = 0 }
+        bold_w = reg_w
+    end
+    return regular, bold, math.max(reg_w, bold_w)
 end
 
 -- Records a D-pad focus stop of the content being built.
@@ -377,16 +390,31 @@ function TabStrip:_buildTabs()
 end
 
 function TabStrip:_buildLabel(text)
-    return LeftContainer:new{
-        dimen = Geom:new{ w = self.width, h = self.height },
-        TextWidget:new{
+    local label_w
+    local ok_label = pcall(function()
+        label_w = TextWidget:new{
             text      = text,
             face      = self.face,
             fgcolor   = self.fgcolor,
             bold      = true,
             max_width = self.width,
             padding   = 0,
-        },
+        }
+        local _ = label_w:getSize()
+    end)
+    if not ok_label or not label_w or not label_w.face then
+        if label_w then pcall(function() label_w:free() end) end
+        label_w = TextWidget:new{
+            text      = text,
+            face      = self.face,
+            fgcolor   = self.fgcolor,
+            max_width = self.width,
+            padding   = 0,
+        }
+    end
+    return LeftContainer:new{
+        dimen = Geom:new{ w = self.width, h = self.height },
+        label_w,
     }
 end
 

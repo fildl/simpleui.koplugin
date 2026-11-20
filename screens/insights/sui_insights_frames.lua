@@ -74,6 +74,26 @@ end
 
 -- The icon `icon` in a box of `d` px, in the accent colour when one is set.
 local function badge(icon, d)
+    local stat_slot = icon == "calendar_select" and "sui_stat_calendar" or ("sui_stat_" .. icon)
+    local override = SUIStyle.getIcon and (SUIStyle.getIcon(stat_slot) or SUIStyle.getIcon("sui_stat_" .. icon) or SUIStyle.getIcon(icon))
+    if override then
+        local safe_file = SUIStyle.safeIconPath and SUIStyle.safeIconPath(override, nil) or override
+        local ImageWidget = require("ui/widget/imagewidget")
+        local inner = ImageWidget:new{
+            file = safe_file,
+            width = d,
+            height = d,
+            is_icon = true,
+            alpha = true,
+            original_in_nightmode = true,
+        }
+        local Accent = require("infra/sui_accent")
+        local clr = (Accent.accentColor or Accent.color)() or SUIStyle.COLOR.text_primary
+        return CenterContainer:new{
+            dimen = Geom:new{ w = d, h = d },
+            UI.makeAlphaMaskWidget(inner, clr, Geom:new{ w = d, h = d }),
+        }
+    end
     return CenterContainer:new{
         dimen = Geom:new{ w = d, h = d },
         UI.makeAccentText({
